@@ -1,0 +1,8 @@
+streamlit
+langchain
+langchain-community
+langchain-nebius
+sqlalchemy
+psycopg2-binary   # for PostgreSQL
+pymysql           # for MySQL
+pandas
