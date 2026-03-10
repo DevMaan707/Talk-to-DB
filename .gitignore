@@ -1,2 +1,5 @@
 Lib
 Scripts
+.env
+__pycache__/
+*.pyc
