@@ -21,3 +21,22 @@ MOCK_SCHEMA = [
     {"table_name": "orders",    "column_name": "quantity",   "column_type": "INTEGER"},
     {"table_name": "orders",    "column_name": "order_date", "column_type": "DATE"},
 ]
+
+MOCK_RELATIONSHIP_SCHEMA = [
+    {"table_name": "customers", "column_name": "id",          "column_type": "INTEGER"},
+    {"table_name": "customers", "column_name": "name",        "column_type": "VARCHAR"},
+    {"table_name": "customers", "column_name": "region",      "column_type": "VARCHAR"},
+    {"table_name": "orders",    "column_name": "order_id",    "column_type": "INTEGER"},
+    {"table_name": "orders",    "column_name": "customer_id", "column_type": "INTEGER"},
+    {"table_name": "orders",    "column_name": "revenue",     "column_type": "DECIMAL"},
+]
+
+MOCK_RELATIONSHIPS = [
+    {
+        "name": "orders_customer_id_fkey",
+        "source_table": "orders",
+        "source_column": "customer_id",
+        "target_table": "customers",
+        "target_column": "id",
+    }
+]

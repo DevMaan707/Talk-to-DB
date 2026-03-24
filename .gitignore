@@ -3,3 +3,7 @@ Scripts
 .env
 __pycache__/
 *.pyc
+.schema_embedding_cache/
+query_logs.txt
+schema_snapshot.json
+schema_annotations.json

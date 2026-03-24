@@ -2,7 +2,8 @@
 import sys
 
 NO_DB_NEEDED = ["test_dialect.py", "test_drift.py", "test_access.py",
-                "test_feedback.py", "test_embeddings.py"]
+                "test_feedback.py", "test_embeddings.py", "test_sql_validation.py",
+                "test_evidence.py"]
 NEEDS_LLM = ["test_confidence.py", "test_ambiguity.py", "test_validation.py"]
 NEEDS_LIVE_DB = ["test_temporal.py"]
 
@@ -31,7 +32,7 @@ if __name__ == "__main__":
         all_failed += run_group("No DB / No LLM needed", NO_DB_NEEDED)
 
     if mode in ("all", "llm"):
-        all_failed += run_group("Needs LLM (NEBIUS_API_KEY required)", NEEDS_LLM)
+        all_failed += run_group("Needs LLM (GROQ_API_KEY required)", NEEDS_LLM)
 
     if mode in ("all", "db"):
         all_failed += run_group("Needs Live DB (run setup_docker_db.py start first)", NEEDS_LIVE_DB)
