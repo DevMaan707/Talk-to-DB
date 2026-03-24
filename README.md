@@ -158,6 +158,53 @@ This is the actual runtime flow of the application:
 15. The result is semantically validated.
 16. The user can mark the result as correct or incorrect.
 
+## Prerequisites
+
+Before running the project, make sure these are installed on your machine:
+
+- `Python 3.10+`
+- `Docker Desktop`
+- `Git`
+
+Quick checks:
+
+```powershell
+python --version
+docker --version
+git --version
+```
+
+If `docker --version` fails, install Docker Desktop and start it before continuing.
+
+## First-Time Setup
+
+### 1. Get the Project
+
+If you already have the repo locally, open a terminal in the project folder.
+
+If not:
+
+```powershell
+git clone git@github.com:DevMaan707/Talk-to-DB.git
+cd Talk-to-DB
+```
+
+### 2. Create a Virtual Environment
+
+This is optional, but recommended.
+
+```powershell
+python -m venv .venv
+.venv\Scripts\activate
+```
+
+If activation is blocked in PowerShell, run:
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.venv\Scripts\activate
+```
+
 ## Step-by-Step: How to Start Using It
 
 ### 1. Install Dependencies
@@ -194,7 +241,44 @@ GROQ_API_KEY=YOUR_GROQ_API_KEY
 python setup_docker_db.py start
 ```
 
-This creates and seeds a PostgreSQL database with sample `employees` and `orders` tables.
+What this command does:
+
+- creates a PostgreSQL Docker container named `talktodb_pg`
+- maps container port `5432` to local port `5433`
+- creates a database named `talktodb_test`
+- creates sample `employees` and `orders` tables
+- inserts demo data automatically
+
+You do not need to manually create the Docker container if you use this script.
+
+To verify the DB is running:
+
+```powershell
+python setup_docker_db.py status
+```
+
+If you want to stop or remove it later:
+
+```powershell
+python setup_docker_db.py stop
+python setup_docker_db.py destroy
+```
+
+### 3A. Optional: Manual Docker Way
+
+If you want to create the PostgreSQL container manually instead of using the helper script:
+
+```powershell
+docker run -d --name talktodb_pg -e POSTGRES_DB=talktodb_test -e POSTGRES_USER=testuser -e POSTGRES_PASSWORD=testpass -p 5433:5432 postgres:15
+```
+
+Then seed it using:
+
+```powershell
+python setup_docker_db.py seed
+```
+
+For most users, `python setup_docker_db.py start` is the correct path.
 
 ### 4. Run the App
 
@@ -208,6 +292,8 @@ Open:
 http://127.0.0.1:8501
 ```
 
+If the app does not open automatically, copy the URL into your browser.
+
 ### 5. Connect to the Demo Database
 
 You can either paste the URI directly or use the form and generate it.
@@ -218,6 +304,15 @@ Demo URI:
 postgresql+psycopg2://testuser:testpass@localhost:5433/talktodb_test
 ```
 
+This URI means:
+
+- `postgresql+psycopg2` = PostgreSQL driver
+- `testuser` = database username
+- `testpass` = database password
+- `localhost` = database is on your own machine
+- `5433` = mapped Docker port
+- `talktodb_test` = database name
+
 If you use the generate form, enter:
 
 - Host: `localhost`
@@ -227,7 +322,21 @@ If you use the generate form, enter:
 - Database Name: `talktodb_test`
 - Database Type: `PostgreSQL`
 
-### 6. Choose a Role
+### 6. What to Click in the UI
+
+When the app opens:
+
+1. Choose `Yes, I know the URI` if you want to paste the full DB URI.
+2. Paste:
+   `postgresql+psycopg2://testuser:testpass@localhost:5433/talktodb_test`
+3. Or choose `No, generate it for me` and fill the form values shown above.
+4. Choose your role from the sidebar.
+5. Type a question in the text area.
+6. Click the query button.
+7. Review the generated SQL and the `Why this SQL?` panel.
+8. Click the execute button to run it.
+
+### 7. Choose a Role
 
 - `viewer`
   - basic lookup and aggregation only
@@ -236,7 +345,9 @@ If you use the generate form, enter:
 - `admin`
   - full query intent access
 
-### 7. Ask a Query
+Use `admin` for the most complete demo, because some financial or sensitive queries are blocked for other roles.
+
+### 8. Ask a Query
 
 Recommended demo prompts:
 
@@ -246,11 +357,17 @@ Recommended demo prompts:
 - `show me the schema`
 - `show top products`
 
-### 8. If Ambiguity Is Detected
+### 9. If Ambiguity Is Detected
 
 The app may ask for clarification. Type the clarification and submit it. The system then rebuilds the query with the clarified intent.
 
-### 9. Review the Query Preview
+Example:
+
+- user asks: `show top products`
+- app asks: top by what metric?
+- user clarifies: `top by total revenue`
+
+### 10. Review the Query Preview
 
 Before execution, the app shows:
 
@@ -265,7 +382,7 @@ The evidence panel shows:
 - join evidence
 - temporal ranges used
 
-### 10. Approve and Execute
+### 11. Approve and Execute
 
 Click the execute button after reviewing the SQL.
 
@@ -276,6 +393,25 @@ After execution, the app shows:
 - explanation section
 - semantic validation warning if needed
 - feedback section for corrections
+
+## Quick Start for Demo Day
+
+If you only want the shortest working path:
+
+```powershell
+python -m venv .venv
+.venv\Scripts\activate
+python -m pip install -r requirements.txt
+$env:GROQ_API_KEY="YOUR_GROQ_API_KEY"
+python setup_docker_db.py start
+python -m streamlit run app.py
+```
+
+Then open `http://127.0.0.1:8501` and use:
+
+```text
+postgresql+psycopg2://testuser:testpass@localhost:5433/talktodb_test
+```
 
 ## Step-by-Step: How to Test It
 
@@ -315,6 +451,69 @@ python run_all_tests.py all
 python setup_docker_db.py status
 python setup_docker_db.py stop
 python setup_docker_db.py destroy
+```
+
+## Troubleshooting
+
+### Docker Is Not Running
+
+Symptom:
+
+- `python setup_docker_db.py start` fails
+
+Fix:
+
+- open Docker Desktop
+- wait until Docker reports it is running
+- run the start command again
+
+### Port 5433 Is Already In Use
+
+Symptom:
+
+- the DB fails to start or the app connects to the wrong PostgreSQL server
+
+Fix:
+
+- stop the existing service using port `5433`
+- or change the port in `setup_docker_db.py` and the URI you use in the app
+
+### Streamlit Does Not Start
+
+Symptom:
+
+- `python -m streamlit run app.py` fails
+
+Fix:
+
+- make sure dependencies are installed
+- run `python -m pip install -r requirements.txt`
+
+### The App Says the API Key Is Missing
+
+Symptom:
+
+- query generation fails before SQL is produced
+
+Fix:
+
+- set `GROQ_API_KEY` in PowerShell or `.env`
+- restart Streamlit after changing the key
+
+### The App Cannot Connect to PostgreSQL
+
+Symptom:
+
+- connection refused or password/authentication failure
+
+Fix:
+
+- run `python setup_docker_db.py status`
+- if broken, run:
+
+```powershell
+python setup_docker_db.py destroy
+python setup_docker_db.py start
 ```
 
 ## Suggested Viva Demo Flow
