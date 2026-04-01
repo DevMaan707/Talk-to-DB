@@ -315,23 +315,24 @@ if st.session_state.db_uri:
                         relevant_relationships = schema_context.get("relationships") or relationships
 
                     schema_for_prompt = relevant_columns if relevant_columns else schema_columns
-                    if not (st.session_state.ambiguity_resolved and st.session_state.ambiguity_query == query):
-                        ambiguity_questions = detect_ambiguity(query, schema_for_prompt)
-                        if ambiguity_questions:
-                            st.session_state.run_requested = False
-                            st.session_state.ambiguity_questions = ambiguity_questions
-                            st.session_state.ambiguity_query = query
-                            st.session_state.ambiguity_resolved = False
-                            st.warning("This question seems ambiguous. Please clarify.")
-                            for q in ambiguity_questions:
-                                st.write(q)
-                            clarification = st.text_input("Clarification", key="ambiguity_clarification")
-                            if st.button("Use clarification") and clarification:
-                                st.session_state.ambiguity_resolved = True
-                                st.session_state.ambiguity_resolved_query = f"{query}. Clarification: {clarification}"
-                                st.session_state.run_requested = True
-                                st.rerun()
-                            st.stop()
+                    # Skip ambiguity detection - let LLM handle it directly
+                    # if not (st.session_state.ambiguity_resolved and st.session_state.ambiguity_query == query):
+                    #     ambiguity_questions = detect_ambiguity(query, schema_for_prompt)
+                    #     if ambiguity_questions:
+                    #         st.session_state.run_requested = False
+                    #         st.session_state.ambiguity_questions = ambiguity_questions
+                    #         st.session_state.ambiguity_query = query
+                    #         st.session_state.ambiguity_resolved = False
+                    #         st.warning("This question seems ambiguous. Please clarify.")
+                    #         for q in ambiguity_questions:
+                    #             st.write(q)
+                    #         clarification = st.text_input("Clarification", key="ambiguity_clarification")
+                    #         if st.button("Use clarification") and clarification:
+                    #             st.session_state.ambiguity_resolved = True
+                    #             st.session_state.ambiguity_resolved_query = f"{query}. Clarification: {clarification}"
+                    #             st.session_state.run_requested = True
+                    #             st.rerun()
+                    #         st.stop()
 
                     effective_query = query
                     if st.session_state.ambiguity_resolved and st.session_state.ambiguity_query == query:

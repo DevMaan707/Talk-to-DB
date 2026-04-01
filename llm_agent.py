@@ -221,11 +221,44 @@ def get_embedding_cache_paths(
     return base_dir / "index.faiss", base_dir / "meta.json"
 
 
-def is_schema_question(question: str) -> bool:
-    q = question.lower()
-    if any(term in q for term in SCHEMA_INFO_TERMS):
+def is_schema_question(question: str, schema_columns: list[dict] | None = None) -> bool:
+    """Detect if the question is asking about database schema/metadata vs actual data.
+    
+    A schema question asks about structure (tables, columns) without referencing
+    specific data rows. A data question references actual tables to retrieve data.
+    """
+    q = question.lower().strip()
+    
+    # If question mentions actual table names, it's likely a data question
+    if schema_columns:
+        table_names = {col["table_name"].lower() for col in schema_columns}
+        for table_name in table_names:
+            if table_name in q:
+                return False  # References actual table = data question
+    
+    # Strong indicators of schema/metadata questions (asking about structure, not data)
+    structure_indicators = [
+        "show tables", "list tables", "what tables", "which tables",
+        "describe table", "describe schema", "table structure",
+        "database schema", "show schema", "schema information",
+    ]
+    
+    # Questions about columns without referencing data
+    column_patterns = [
+        r"what columns? (?:are|does) (?:the )?\w+ (?:table )?have",
+        r"what (?:are|is) the (?:column|field) (?:name|list)",
+        r"show (?:me )?the (?:columns?|fields?)(?: in| of)?",
+        r"list (?:all )?(?:the )?(?:columns?|fields?)",
+    ]
+    
+    if any(indicator in q for indicator in structure_indicators):
         return True
-    return any(term in q for term in TABLE_LISTING_TERMS)
+    
+    for pattern in column_patterns:
+        if re.search(pattern, q):
+            return True
+    
+    return False
 
 
 def get_question_tables(question: str, schema_columns: list[dict]) -> list[str]:
@@ -236,7 +269,7 @@ def get_question_tables(question: str, schema_columns: list[dict]) -> list[str]:
 
 def run_schema_query(question: str, schema_columns: list[dict]):
     requested_tables = set(get_question_tables(question, schema_columns))
-    wants_columns = is_schema_question(question)
+    wants_columns = is_schema_question(question, schema_columns)
 
     if wants_columns:
         filtered = [
@@ -349,6 +382,7 @@ def validate_unqualified_identifiers(
     columns_by_table: dict[str, set[str]],
     referenced_tables: list[str],
     select_aliases: set[str],
+    table_aliases: dict[str, str],
 ) -> None:
     scrubbed = strip_sql_literals(sql_query)
     scrubbed = re.sub(r"\b[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*\b", " ", scrubbed)
@@ -358,7 +392,9 @@ def validate_unqualified_identifiers(
     }
 
     allowed_columns = set().union(*(columns_by_table.get(table, set()) for table in referenced_tables))
-    ignored = SQL_KEYWORDS | SQL_FUNCTIONS | set(referenced_tables) | select_aliases | {"public"}
+    # Include table aliases (keys of aliases dict) in ignored set
+    alias_names = set(table_aliases.keys())
+    ignored = SQL_KEYWORDS | SQL_FUNCTIONS | set(referenced_tables) | select_aliases | alias_names | {"public"}
 
     invalid_tokens = sorted(
         token for token in candidate_tokens
@@ -411,14 +447,14 @@ def validate_sql_query(
     if sql_query.count(";") > 1:
         raise ValueError("Only a single SELECT statement is allowed.")
 
-    if not is_schema_question(question):
+    if not is_schema_question(question, schema_columns):
         if re.search(r"\b(pg_catalog|information_schema|sqlite_master|sys\.)\b", lower_sql):
             raise ValueError("System catalog queries are only allowed for explicit schema questions.")
 
     aliases, referenced_tables = extract_table_aliases(sql_query, allowed_tables)
     select_aliases = extract_select_aliases(sql_query)
     validate_qualified_identifiers(sql_query, columns_by_table, aliases)
-    validate_unqualified_identifiers(sql_query, columns_by_table, referenced_tables, select_aliases)
+    validate_unqualified_identifiers(sql_query, columns_by_table, referenced_tables, select_aliases, aliases)
 
     if engine is not None and db_uri:
         validate_with_explain(sql_query, engine, db_uri)
@@ -499,6 +535,7 @@ Rules:
 - Never invent identifier names such as `tablename` or `columnname`.
 - For normal data questions, query only the business tables from Schema.
 - Do not query `pg_catalog`, `information_schema`, `sqlite_master`, or `sys.*` unless the user explicitly asks for schema metadata.
+- Use appropriate SQL features based on the question: JOINs (INNER/LEFT/RIGHT/FULL) for combining tables, subqueries or CTEs (WITH clauses) for complex logic, window functions (ROW_NUMBER, RANK, LAG, LEAD) for analytics, GROUP BY and aggregations (COUNT, SUM, AVG, MIN, MAX) for summaries, ORDER BY for sorting, LIMIT/OFFSET for pagination, CASE expressions for conditional logic, and views if the schema provides them.
 
 Schema:
 {schema_str}
@@ -946,14 +983,24 @@ def retrieve_relevant_columns(question: str, embed_store, top_k: int = 8) -> lis
 def detect_ambiguity(question: str, schema_columns: list[dict]) -> list[str]:
     schema_str = format_schema(schema_columns, max_columns=120)
     prompt = f"""
-You are a SQL assistant. Determine if the user question is ambiguous given the schema.
+You are a SQL assistant. Determine if the user question is TRULY ambiguous given the schema.
 
 Schema:
 {schema_str}
 
 Question: "{question}"
 
-If the question is ambiguous or missing a required choice, propose 1-2 short clarifying questions.
+A question is ONLY ambiguous if:
+- It references tables that don't exist in the schema
+- It's missing critical information that would prevent writing a SQL query
+- It could reasonably be interpreted in two completely different ways
+
+A question is NOT ambiguous just because:
+- The user didn't specify exact column names (we can infer from schema)
+- The user didn't specify join conditions (we have foreign key relationships)
+- Multiple columns could theoretically be used (the system will pick the most logical one)
+
+If the question is truly ambiguous, propose 1-2 short clarifying questions.
 Reply ONLY in JSON:
 {{
   "ambiguous": true or false,
@@ -966,7 +1013,7 @@ Reply ONLY in JSON:
         import json
         import re as _re
         raw = response.content
-        json_str = _re.search(r"\{.*\}", raw, _re.DOTALL).group()
+        json_str = _re.search(r"\{{.*\}}", raw, _re.DOTALL).group()
         data = json.loads(json_str)
         if data.get("ambiguous"):
             return data.get("questions", [])[:2]
@@ -1034,7 +1081,7 @@ def prepare_query(
     if relationships is None:
         relationships = get_schema_relationships(engine)
 
-    if is_schema_question(question):
+    if is_schema_question(question, schema_columns):
         sql_query, _, _ = run_schema_query(question, schema_columns)
         return sql_query
 
@@ -1052,7 +1099,7 @@ def prepare_query(
 
 def execute_sql_query(sql_query: str, engine, question: str | None = None, schema_columns=None):
     """Execute a validated SQL query or serve deterministic schema results."""
-    if question and is_schema_question(question):
+    if question and is_schema_question(question, schema_columns):
         if schema_columns is None:
             schema_columns = get_schema_columns(engine)
         _, rows, columns = run_schema_query(question, schema_columns)
