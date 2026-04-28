@@ -228,8 +228,23 @@ def is_schema_question(question: str, schema_columns: list[dict] | None = None) 
     specific data rows. A data question references actual tables to retrieve data.
     """
     q = question.lower().strip()
+
+    # Direct schema intent should always be treated as metadata requests,
+    # even when table names are mentioned (e.g., "schema of employees").
+    explicit_schema_terms = [
+        "schema",
+        "metadata",
+        "table structure",
+        "database structure",
+        "column names",
+        "columns and types",
+        "field names",
+    ]
+    if any(term in q for term in explicit_schema_terms):
+        return True
     
-    # If question mentions actual table names, it's likely a data question
+    # If question mentions actual table names, it's likely a data question.
+    # This runs after explicit schema checks above.
     if schema_columns:
         table_names = {col["table_name"].lower() for col in schema_columns}
         for table_name in table_names:
@@ -1251,6 +1266,5 @@ def explain_results(question: str, sql_query: str, rows, columns):
 
     response = get_llm().invoke(prompt)
     return response.content.strip()
-
 
 
