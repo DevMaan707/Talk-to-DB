@@ -100,6 +100,53 @@ if "last_result" not in st.session_state:
 
 db_uri = None
 
+
+def _dedupe_column_names(columns):
+    """Return unique display names while preserving original order."""
+    seen = {}
+    unique = []
+    for col in columns:
+        key = str(col)
+        seen[key] = seen.get(key, 0) + 1
+        unique.append(key if seen[key] == 1 else f"{key}_{seen[key]}")
+    return unique
+
+
+def analyze_sql_safety(sql_query: str) -> dict:
+    statement = (sql_query or "").strip().lower().rstrip(";")
+    risky_keywords = {
+        "insert": "Can add new rows and permanently change dataset state.",
+        "update": "Can modify existing rows and overwrite business data.",
+        "delete": "Can remove rows and cause data loss.",
+        "drop": "Can remove tables/views/indexes entirely.",
+        "truncate": "Can delete all rows from a table instantly.",
+        "alter": "Can change schema and break app/query compatibility.",
+        "create": "Can create objects (views/indexes/tables) and change DB structure.",
+        "grant": "Can change access permissions.",
+        "revoke": "Can remove access permissions.",
+        "refresh": "Can rewrite materialized view contents.",
+    }
+
+    found = []
+    for keyword, impact in risky_keywords.items():
+        if f"{keyword} " in f"{statement} ":
+            found.append((keyword.upper(), impact))
+
+    is_read_only = statement.startswith("select") or statement.startswith("with")
+    if is_read_only and not found:
+        return {"unsafe": False, "found": []}
+    return {"unsafe": True, "found": found}
+
+
+def build_safer_question(original_question: str) -> str:
+    return (
+        f"{original_question}\n\n"
+        "Safety constraints: Return a read-only SQL query only. "
+        "Use SELECT/CTE only. Do not use CREATE, ALTER, DROP, INSERT, UPDATE, DELETE, "
+        "TRUNCATE, GRANT, REVOKE, or REFRESH MATERIALIZED VIEW."
+    )
+
+
 # --- Step 1: Database Connection ---
 if not st.session_state.uri_generated:
     st.subheader("Database Connection")
@@ -191,7 +238,8 @@ if st.session_state.db_uri:
 
             # Show results table
             if isinstance(rows, list):
-                df = pd.DataFrame(rows, columns=columns)
+                safe_columns = _dedupe_column_names(columns)
+                df = pd.DataFrame(rows, columns=safe_columns)
                 row_height = 35
                 table_height = min(800, max(200, len(df) * row_height))
                 st.dataframe(df, use_container_width=True, height=table_height)
@@ -360,9 +408,12 @@ if st.session_state.db_uri:
                     st.session_state.pending_execution = {
                         "db_uri": st.session_state.db_uri,
                         "question": effective_query,
+                        "original_question": query,
                         "sql_query": sql_query,
                         "schema_columns": schema_columns,
                         "schema_for_prompt": schema_for_prompt,
+                        "relationships": relevant_relationships,
+                        "relevant_columns": relevant_columns,
                         "evidence": evidence,
                     }
                     st.session_state.execute_requested = False
@@ -380,16 +431,58 @@ if st.session_state.db_uri:
         st.code(pending["sql_query"], language="sql")
         render_evidence_panel(pending.get("evidence"), expanded=True)
 
-        preview_col1, preview_col2 = st.columns(2)
-        with preview_col1:
-            if st.button("Approve and Execute", type="primary", use_container_width=True):
-                st.session_state.execute_requested = True
-                st.rerun()
-        with preview_col2:
-            if st.button("Cancel Preview", use_container_width=True):
-                st.session_state.pending_execution = None
-                st.session_state.execute_requested = False
-                st.rerun()
+        safety = analyze_sql_safety(pending["sql_query"])
+        if safety["unsafe"]:
+            st.error("Unsafe SQL detected. Executing this query may modify data or database structure.")
+            st.markdown("**Possible impact**")
+            if safety["found"]:
+                for keyword, impact in safety["found"]:
+                    st.write(f"- `{keyword}`: {impact}")
+            else:
+                st.write("- Query is not a read-only SELECT/CTE statement.")
+
+            unsafe_col1, unsafe_col2, unsafe_col3 = st.columns(3)
+            with unsafe_col1:
+                if st.button("Yes, Run Anyway", type="primary", use_container_width=True):
+                    st.session_state.execute_requested = True
+                    st.rerun()
+            with unsafe_col2:
+                if st.button("Re-run with Safer SQL", use_container_width=True):
+                    try:
+                        engine, _, _ = load_schema_context(pending["db_uri"])
+                        safer_question = build_safer_question(pending.get("original_question") or pending["question"])
+                        safer_sql = prepare_query(
+                            pending["db_uri"],
+                            safer_question,
+                            engine=engine,
+                            schema_columns=pending["schema_columns"],
+                            relationships=pending.get("relationships"),
+                            few_shot_examples=st.session_state.few_shot_examples,
+                            relevant_columns=pending.get("relevant_columns"),
+                        )
+                        st.session_state.pending_execution["question"] = safer_question
+                        st.session_state.pending_execution["sql_query"] = safer_sql
+                        st.session_state.execute_requested = False
+                        st.success("Generated a safer read-only SQL preview.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Could not generate safer SQL: {e}")
+            with unsafe_col3:
+                if st.button("Cancel Preview", use_container_width=True):
+                    st.session_state.pending_execution = None
+                    st.session_state.execute_requested = False
+                    st.rerun()
+        else:
+            preview_col1, preview_col2 = st.columns(2)
+            with preview_col1:
+                if st.button("Approve and Execute", type="primary", use_container_width=True):
+                    st.session_state.execute_requested = True
+                    st.rerun()
+            with preview_col2:
+                if st.button("Cancel Preview", use_container_width=True):
+                    st.session_state.pending_execution = None
+                    st.session_state.execute_requested = False
+                    st.rerun()
 
     if st.session_state.execute_requested and st.session_state.pending_execution:
         pending = st.session_state.pending_execution
@@ -497,5 +590,3 @@ if st.session_state.db_uri:
                         last_result["schema_columns"],
                     )
                     st.success("Thanks! This will improve future queries.")
-
-

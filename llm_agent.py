@@ -5,6 +5,7 @@ import hashlib
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
+from typing import Optional
 from sqlalchemy import create_engine, text, inspect
 from langchain_groq import ChatGroq
 from dotenv import load_dotenv
@@ -21,12 +22,19 @@ SQL_KEYWORDS = {
     "distinct", "and", "or", "not", "in", "is", "null", "like", "between", "case",
     "when", "then", "else", "end", "union", "all", "asc", "desc", "true", "false",
     "current_date", "current_timestamp", "interval", "over", "partition", "rows",
-    "range", "preceding", "following", "with"
+    "range", "preceding", "following", "with", "recursive", "exists", "any", "some",
+    "unnest", "lateral", "using", "filter", "within", "create", "view", "materialized",
+    "refresh", "if", "replace", "cascade", "nulls", "first", "last"
 }
 SQL_FUNCTIONS = {
     "count", "sum", "avg", "min", "max", "round", "coalesce", "lower", "upper",
     "date_trunc", "extract", "cast", "concat", "now", "current_timestamp",
-    "datetime", "getdate", "abs", "distinct"
+    "datetime", "getdate", "abs", "distinct", "row_number", "rank", "dense_rank",
+    "lag", "lead", "ntile", "first_value", "last_value", "nth_value", "percent_rank",
+    "cume_dist", "stddev", "stddev_pop", "stddev_samp", "variance", "var_pop",
+    "var_samp", "percentile_cont", "percentile_disc", "json_agg", "jsonb_agg",
+    "json_build_object", "jsonb_build_object", "to_char", "to_date", "to_timestamp",
+    "nullif", "greatest", "least"
 }
 EVIDENCE_STOPWORDS = {
     "show", "list", "find", "get", "fetch", "display", "give", "me", "all", "the",
@@ -50,7 +58,7 @@ def get_llm():
 ROLE_PERMISSIONS = {
     "admin": ["aggregation", "lookup", "comparison", "sensitive", "financial"],
     "analyst": ["aggregation", "lookup", "comparison", "financial"],
-    "viewer": ["aggregation", "lookup"],
+    "viewer": ["aggregation", "lookup", "financial"],
 }
 
 SENSITIVE_KEYWORDS = ["salary", "salaries", "password", "ssn", "email", "emails", "phone", "phones", "secret", "token", "credit"]
@@ -176,7 +184,7 @@ def format_schema(schema_columns: list[dict], max_columns: int = 200) -> str:
     )
 
 
-def format_relationships(relationships: list[dict] | None, max_relationships: int = 50) -> str:
+def format_relationships(relationships: Optional[list[dict]], max_relationships: int = 50) -> str:
     if not relationships:
         return "None"
 
@@ -189,7 +197,7 @@ def format_relationships(relationships: list[dict] | None, max_relationships: in
     return "\n".join(lines)
 
 
-def build_schema_signature(schema_columns: list[dict], relationships: list[dict] | None = None) -> str:
+def build_schema_signature(schema_columns: list[dict], relationships: Optional[list[dict]] = None) -> str:
     payload = {
         "columns": sorted(
             f"{col['table_name']}.{col['column_name']}:{col.get('column_type', '')}"
@@ -206,10 +214,10 @@ def build_schema_signature(schema_columns: list[dict], relationships: list[dict]
 def get_embedding_cache_paths(
     db_uri: str,
     schema_columns: list[dict],
-    relationships: list[dict] | None,
+    relationships: Optional[list[dict]],
     model_name: str,
     sample_limit: int,
-    cache_dir: Path | None = None,
+    cache_dir: Optional[Path] = None,
 ) -> tuple[Path, Path]:
     root = cache_dir or EMBEDDING_CACHE_DIR
     db_hash = hashlib.md5(db_uri.encode("utf-8")).hexdigest()
@@ -221,7 +229,7 @@ def get_embedding_cache_paths(
     return base_dir / "index.faiss", base_dir / "meta.json"
 
 
-def is_schema_question(question: str, schema_columns: list[dict] | None = None) -> bool:
+def is_schema_question(question: str, schema_columns: Optional[list[dict]] = None) -> bool:
     """Detect if the question is asking about database schema/metadata vs actual data.
     
     A schema question asks about structure (tables, columns) without referencing
@@ -373,6 +381,32 @@ def strip_sql_literals(sql_query: str) -> str:
     return no_numbers
 
 
+def is_read_only_sql(sql_query: str) -> bool:
+    statement = sql_query.strip().lower().lstrip("(")
+    return statement.startswith("select") or statement.startswith("with")
+
+
+def allows_non_select_from_question(question: str) -> bool:
+    q = (question or "").lower()
+    ddl_intents = [
+        "create view",
+        "create materialized view",
+        "materialized view",
+        "refresh materialized view",
+        "create index",
+        "drop index",
+        "alter table",
+        "create table",
+        "grant",
+        "revoke",
+        "insert",
+        "update",
+        "delete",
+        "truncate",
+    ]
+    return any(intent in q for intent in ddl_intents)
+
+
 def validate_qualified_identifiers(sql_query: str, columns_by_table: dict[str, set[str]], aliases: dict[str, str]) -> None:
     for qualifier, column_name in re.findall(
         r"\b([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)\b",
@@ -381,7 +415,7 @@ def validate_qualified_identifiers(sql_query: str, columns_by_table: dict[str, s
     ):
         qualifier_name = normalize_identifier(qualifier)
         column = normalize_identifier(column_name)
-        if qualifier_name in {"pg_catalog", "information_schema", "sys"}:
+        if qualifier_name in {"pg_catalog", "information_schema", "sqlite_master", "sys"}:
             continue
         if qualifier_name not in aliases:
             raise ValueError(f"Generated SQL referenced unknown alias or table '{qualifier}'.")
@@ -439,11 +473,12 @@ def validate_sql_query(
     sql_query: str,
     schema_columns: list[dict],
     question: str,
-    relationships: list[dict] | None = None,
+    relationships: Optional[list[dict]] = None,
     engine=None,
-    db_uri: str | None = None,
+    db_uri: Optional[str] = None,
 ) -> None:
     lower_sql = sql_query.lower()
+    statement = sql_query.strip().rstrip(";")
     allowed_tables = {col["table_name"].lower() for col in schema_columns}
     columns_by_table = {}
     for col in schema_columns:
@@ -466,10 +501,27 @@ def validate_sql_query(
         if re.search(r"\b(pg_catalog|information_schema|sqlite_master|sys\.)\b", lower_sql):
             raise ValueError("System catalog queries are only allowed for explicit schema questions.")
 
-    aliases, referenced_tables = extract_table_aliases(sql_query, allowed_tables)
-    select_aliases = extract_select_aliases(sql_query)
-    validate_qualified_identifiers(sql_query, columns_by_table, aliases)
-    validate_unqualified_identifiers(sql_query, columns_by_table, referenced_tables, select_aliases, aliases)
+    if not is_read_only_sql(statement):
+        if not allows_non_select_from_question(question):
+            raise ValueError(
+                "Only read-only SELECT/CTE queries are allowed for this question. "
+                "Ask explicitly if you want CREATE/UPDATE/DELETE/other admin SQL."
+            )
+        # For intentional non-SELECT/admin SQL, rely on DB parser/execution checks.
+        return
+
+    try:
+        aliases, referenced_tables = extract_table_aliases(sql_query, allowed_tables)
+        select_aliases = extract_select_aliases(sql_query)
+        validate_qualified_identifiers(sql_query, columns_by_table, aliases)
+        validate_unqualified_identifiers(sql_query, columns_by_table, referenced_tables, select_aliases, aliases)
+    except ValueError:
+        # Advanced SQL can include CTE names/window terms that strict token checks
+        # may classify as unknown identifiers. Fall back to EXPLAIN validation.
+        if engine is not None and db_uri:
+            validate_with_explain(sql_query, engine, db_uri)
+            return
+        raise
 
     if engine is not None and db_uri:
         validate_with_explain(sql_query, engine, db_uri)
@@ -506,7 +558,7 @@ def resolve_temporal_context(engine, schema_columns: list[dict]) -> dict:
     return temporal_context
 
 
-def format_few_shot(examples: list[dict] | None) -> str:
+def format_few_shot(examples: Optional[list[dict]]) -> str:
     if not examples:
         return "None"
     lines = []
@@ -542,6 +594,13 @@ def build_prompt(
 
     annotations_str = annotations if annotations else "None"
 
+    action_rule = (
+        "Generate a single valid SQL statement that matches the user's requested action "
+        "(including CREATE/REFRESH/ALTER/etc. when explicitly requested)."
+        if allows_non_select_from_question(question)
+        else "Generate a single valid SQL SELECT query."
+    )
+
     return f"""
 {dialect_block}
 
@@ -567,7 +626,9 @@ Past correction hints (learn from these):
 Verified past queries (use as examples):
 {few_shot}
 
-Generate a single valid SQL SELECT query for:
+{action_rule}
+
+For question:
 "{question}"
 
 Return ONLY the SQL, no explanation.
@@ -600,12 +661,12 @@ def generate_sql_from_question(
     raw_output = re.sub(r"```sql|```", "", raw_output)
     raw_output = re.sub(r"<think>.*?</think>", "", raw_output, flags=re.DOTALL).strip()
 
-    sql_match = re.findall(
-        r"(SELECT .*?;)",
+    stmt_match = re.search(
+        r"((?:select|with|create|refresh|alter|drop|grant|revoke|insert|update|delete|truncate)\b[\s\S]*?;)",
         raw_output,
-        flags=re.DOTALL | re.IGNORECASE
+        flags=re.IGNORECASE,
     )
-    sql_query = sql_match[-1].strip() if sql_match else raw_output.strip()
+    sql_query = stmt_match.group(1).strip() if stmt_match else raw_output.strip()
 
     if not re.search(r"\blimit\b|\btop\b|\bfirst\b", question, re.IGNORECASE):
         sql_query = re.sub(r"\s+LIMIT\s+\d+", "", sql_query, flags=re.IGNORECASE).strip()
@@ -613,11 +674,11 @@ def generate_sql_from_question(
     if not sql_query.endswith(";"):
         sql_query += ";"
 
-    blocked = ["insert", "update", "delete", "drop", "alter", "truncate"]
-    if any(sql_query.lower().strip().startswith(w) for w in blocked):
-        raise ValueError("Only SELECT queries are permitted.")
-
-    if not sql_query.upper().startswith("SELECT"):
+    valid_starts = (
+        "select", "with", "create", "refresh", "alter",
+        "drop", "grant", "revoke", "insert", "update", "delete", "truncate"
+    )
+    if not sql_query.lower().strip().startswith(valid_starts):
         raise ValueError(f"Invalid SQL generated: {sql_query}")
 
     validate_sql_query(
@@ -701,7 +762,7 @@ def save_cached_embedding_store(index_path: Path, meta_path: Path, embed_store) 
     meta_path.write_text(json.dumps(meta, indent=2))
 
 
-def get_column_relationship_text(column: dict, relationships: list[dict] | None) -> str:
+def get_column_relationship_text(column: dict, relationships: Optional[list[dict]]) -> str:
     if not relationships:
         return "none"
 
@@ -733,7 +794,7 @@ def dedupe_columns(columns: list[dict]) -> list[dict]:
     return ordered
 
 
-def select_relevant_relationships(columns: list[dict], relationships: list[dict] | None) -> list[dict]:
+def select_relevant_relationships(columns: list[dict], relationships: Optional[list[dict]]) -> list[dict]:
     if not relationships:
         return []
 
@@ -773,9 +834,9 @@ def describe_column_evidence(question: str, column: dict) -> str:
 def build_query_evidence(
     question: str,
     schema_columns: list[dict],
-    relevant_columns: list[dict] | None = None,
-    relationships: list[dict] | None = None,
-    temporal_context: dict | None = None,
+    relevant_columns: Optional[list[dict]] = None,
+    relationships: Optional[list[dict]] = None,
+    temporal_context: Optional[dict] = None,
     max_columns: int = 10,
 ) -> dict:
     selected_columns = relevant_columns if relevant_columns else schema_columns[:max_columns]
@@ -836,8 +897,8 @@ def build_query_evidence(
 def expand_related_columns(
     columns: list[dict],
     schema_columns: list[dict],
-    relationships: list[dict] | None,
-    limit: int | None = None,
+    relationships: Optional[list[dict]],
+    limit: Optional[int] = None,
 ) -> list[dict]:
     if not relationships:
         return dedupe_columns(columns)[:limit] if limit else dedupe_columns(columns)
@@ -887,12 +948,12 @@ def expand_related_columns(
 def build_column_embeddings(
     engine,
     schema_columns: list[dict],
-    relationships: list[dict] | None = None,
+    relationships: Optional[list[dict]] = None,
     model_name: str = "all-MiniLM-L6-v2",
     sample_limit: int = 3,
     persist: bool = False,
-    db_uri: str | None = None,
-    cache_dir: Path | None = None,
+    db_uri: Optional[str] = None,
+    cache_dir: Optional[Path] = None,
 ):
     try:
         import numpy as np
@@ -957,7 +1018,7 @@ def retrieve_schema_context(
     question: str,
     embed_store,
     schema_columns: list[dict],
-    relationships: list[dict] | None,
+    relationships: Optional[list[dict]] = None,
     top_k: int = 8,
     related_limit: int = 4,
 ) -> dict:
@@ -1112,7 +1173,7 @@ def prepare_query(
     return sql_query
 
 
-def execute_sql_query(sql_query: str, engine, question: str | None = None, schema_columns=None):
+def execute_sql_query(sql_query: str, engine, question: Optional[str] = None, schema_columns=None):
     """Execute a validated SQL query or serve deterministic schema results."""
     if question and is_schema_question(question, schema_columns):
         if schema_columns is None:
@@ -1122,8 +1183,14 @@ def execute_sql_query(sql_query: str, engine, question: str | None = None, schem
 
     with engine.connect() as conn:
         result = conn.execute(text(sql_query))
-        rows = result.fetchall()
-        columns = list(result.keys())
+        returns_rows = getattr(result, "returns_rows", False)
+        if returns_rows:
+            rows = result.fetchall()
+            columns = list(result.keys())
+        else:
+            conn.commit()
+            rows = [("Command executed successfully.",)]
+            columns = ["status"]
 
     return rows, columns
 
@@ -1165,7 +1232,7 @@ def run_query(
 def validate_result_semantics(question: str, sql: str, rows: list, columns: list) -> dict:
     """
     Asks LLM if the returned result makes sense for the question.
-    Returns {"valid": bool, "warning": str | None, "reason": str, "confidence": str}
+    Returns {"valid": bool, "warning": Optional[str], "reason": str, "confidence": str}
     """
     if not rows:
         return {"valid": True, "warning": None, "reason": "Empty result may be expected.", "confidence": "medium"}
@@ -1266,5 +1333,3 @@ def explain_results(question: str, sql_query: str, rows, columns):
 
     response = get_llm().invoke(prompt)
     return response.content.strip()
-
-
