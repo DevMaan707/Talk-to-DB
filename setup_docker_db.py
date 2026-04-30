@@ -3,6 +3,7 @@ import socket
 import subprocess
 import time
 import sys
+from pathlib import Path
 
 DB_NAME = "talktodb_test"
 DB_USER = "testuser"
@@ -15,41 +16,14 @@ DB_URI = os.getenv(
 )
 CONTAINER = "talktodb_pg"
 
-SQL_SEED = """
-CREATE TABLE IF NOT EXISTS employees (
-    id         SERIAL PRIMARY KEY,
-    name       VARCHAR(100),
-    salary     DECIMAL(10,2),
-    department VARCHAR(50),
-    created_at TIMESTAMP DEFAULT NOW()
-);
+_SEED_FILE = Path(__file__).parent / "seed_company_data.sql"
 
-CREATE TABLE IF NOT EXISTS orders (
-    order_id   SERIAL PRIMARY KEY,
-    product    VARCHAR(100),
-    revenue    DECIMAL(10,2),
-    quantity   INT,
-    order_date DATE DEFAULT CURRENT_DATE
-);
+def _load_seed() -> str:
+    if _SEED_FILE.exists():
+        return _SEED_FILE.read_text(encoding="utf-8")
+    raise FileNotFoundError(f"Seed file not found: {_SEED_FILE}")
 
-TRUNCATE TABLE orders, employees RESTART IDENTITY;
-
-INSERT INTO employees (name, salary, department, created_at) VALUES
-    ('Alice',  75000, 'Engineering', '2023-01-10'),
-    ('Bob',    62000, 'Marketing',   '2023-03-15'),
-    ('Carol',  91000, 'Engineering', '2024-06-01'),
-    ('Dave',   54000, 'HR',          '2022-11-20'),
-    ('Eve',    83000, 'Engineering', '2024-12-05')
-ON CONFLICT DO NOTHING;
-
-INSERT INTO orders (product, revenue, quantity, order_date) VALUES
-    ('Widget A', 1500.00, 10, '2024-01-15'),
-    ('Widget B', 3200.00, 25, '2024-03-20'),
-    ('Gadget X', 8750.00, 5,  '2025-01-10'),
-    ('Gadget Y', 450.00,  2,  '2025-02-28'),
-    ('Widget A', 2200.00, 15, '2025-03-01')
-ON CONFLICT DO NOTHING;
-"""
+SQL_SEED = None  # loaded lazily
 
 
 def run(cmd, check=True, capture=False, input_text=None):
@@ -122,11 +96,11 @@ def start():
 
 
 def seed_via_docker():
-    print("SEED: inserting test data via Docker...")
+    print("SEED: inserting company data via Docker...")
     run(
         f"docker exec -i {CONTAINER} "
         f"psql -v ON_ERROR_STOP=1 -U {DB_USER} -d {DB_NAME}",
-        input_text=SQL_SEED
+        input_text=_load_seed()
     )
     print("OK: seed data inserted.")
 
@@ -141,7 +115,8 @@ def seed_direct():
 
     try:
         engine = create_engine(DB_URI)
-        statements = [s.strip() for s in SQL_SEED.split(";") if s.strip()]
+        seed_sql = _load_seed()
+        statements = [s.strip() for s in seed_sql.split(";") if s.strip()]
         with engine.begin() as conn:
             for stmt in statements:
                 conn.execute(text(stmt))
