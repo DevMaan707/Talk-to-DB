@@ -176,6 +176,99 @@ git --version
 
 If `docker --version` fails, install Docker Desktop and start it before continuing.
 
+## Complete Local Setup (macOS + Windows)
+
+This setup is fully local and uses Docker + the provided seed SQL.
+
+### Default local DB config
+
+- Docker image: `postgres:15`
+- Container: `talktodb_pg`
+- DB name: `talktodb_test`
+- User: `testuser`
+- Password: `testpass`
+- Port mapping: `5433` (local) -> `5432` (container)
+- Seed file: `seed_company_data.sql`
+- DB URI:
+  `postgresql+psycopg2://testuser:testpass@localhost:5433/talktodb_test`
+
+### macOS setup
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+python setup_docker_db.py start
+python -m streamlit run app.py
+```
+
+Open: `http://127.0.0.1:8501`
+
+### Windows PowerShell setup
+
+```powershell
+python -m venv .venv
+.venv\Scripts\activate
+python -m pip install -r requirements.txt
+python setup_docker_db.py start
+python -m streamlit run app.py
+```
+
+Open: `http://127.0.0.1:8501`
+
+### What `python setup_docker_db.py start` does
+
+1. Starts (or creates) `talktodb_pg` using `postgres:15`
+2. Waits for PostgreSQL readiness
+3. Applies `seed_company_data.sql` automatically
+
+You can re-seed anytime:
+
+```bash
+python setup_docker_db.py seed
+```
+
+Check DB health:
+
+```bash
+python setup_docker_db.py status
+```
+
+Stop/remove DB:
+
+```bash
+python setup_docker_db.py stop
+python setup_docker_db.py destroy
+```
+
+### `.env` for local use
+
+The repo includes a committed `.env` for local demo usage.
+
+```env
+GROQ_API_KEY=...
+DB_URI=postgresql+psycopg2://testuser:testpass@localhost:5433/talktodb_test
+```
+
+### Manual Docker + manual seed (optional)
+
+If you prefer manual setup instead of the helper script:
+
+```bash
+docker run -d --name talktodb_pg \
+  -e POSTGRES_DB=talktodb_test \
+  -e POSTGRES_USER=testuser \
+  -e POSTGRES_PASSWORD=testpass \
+  -p 5433:5432 \
+  postgres:15
+```
+
+Then apply seed SQL:
+
+```bash
+docker exec -i talktodb_pg psql -U testuser -d talktodb_test < seed_company_data.sql
+```
+
 ## First-Time Setup
 
 ### 1. Get the Project

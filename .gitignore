@@ -1,6 +1,5 @@
 Lib
 Scripts
-.env
 __pycache__/
 *.pyc
 .schema_embedding_cache/
